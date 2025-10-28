@@ -1,12 +1,16 @@
+import { getDNT } from '../libraries/navigatorData/dnt.js';
 import {registerBidder} from '../src/adapters/bidderFactory.js';
-import {deepAccess, deepClone, getDNT, generateUUID, replaceAuctionPrice} from '../src/utils.js';
+import {deepAccess, deepClone, generateUUID, replaceAuctionPrice} from '../src/utils.js';
 import {ajax} from '../src/ajax.js';
+import {getStorageManager} from '../src/storageManager.js';
 import {VIDEO, BANNER} from '../src/mediaTypes.js';
 import {config} from '../src/config.js';
 
 const BIDDER_CODE = 'alkimi';
 const GVLID = 1169;
+const USER_ID_KEY = 'alkimiUserID';
 export const ENDPOINT = 'https://exchange.alkimi-onboarding.com/bid?prebid=true';
+export const storage = getStorageManager({bidderCode: BIDDER_CODE});
 
 export const spec = {
   code: BIDDER_CODE,
@@ -18,11 +22,11 @@ export const spec = {
   },
 
   buildRequests: function (validBidRequests, bidderRequest) {
-    let bids = [];
-    let bidIds = [];
+    const bids = [];
+    const bidIds = [];
     let eids;
     validBidRequests.forEach(bidRequest => {
-      let formatTypes = getFormatType(bidRequest)
+      const formatTypes = getFormatType(bidRequest)
 
       if (bidRequest.userIdAsEids) {
         eids = eids || bidRequest.userIdAsEids
@@ -38,20 +42,30 @@ export const spec = {
         impMediaTypes: formatTypes,
         adUnitCode: bidRequest.adUnitCode,
         video: deepAccess(bidRequest, 'mediaTypes.video'),
-        banner: deepAccess(bidRequest, 'mediaTypes.banner')
+        banner: deepAccess(bidRequest, 'mediaTypes.banner'),
+        ext: bidRequest.ortb2Imp?.ext
       })
       bidIds.push(bidRequest.bidId)
     })
 
-    const alkimiConfig = config.getConfig('alkimi');
+    const ortb2 = bidderRequest.ortb2
+    const site = ortb2?.site
 
-    let payload = {
+    const id = getUserId()
+    const alkimiConfig = config.getConfig('alkimi')
+    const fpa = ortb2?.source?.ext?.fpa
+    const source = fpa !== null && fpa !== undefined ? { ext: { fpa } } : undefined
+    const walletID = alkimiConfig && alkimiConfig.walletID
+    const userParams = alkimiConfig && alkimiConfig.userParams
+    const user = ((walletID !== null && walletID !== undefined) || (userParams !== null && userParams !== undefined) || (id !== null && id !== undefined)) ? { id, ext: { walletID, userParams } } : undefined
+
+    const payload = {
       requestId: generateUUID(),
       signRequest: {bids, randomUUID: alkimiConfig && alkimiConfig.randomUUID},
       bidIds,
       referer: bidderRequest.refererInfo.page,
       signature: alkimiConfig && alkimiConfig.signature,
-      schain: validBidRequests[0].schain,
+      schain: validBidRequests[0]?.ortb2?.source?.ext?.schain,
       cpp: config.getConfig('coppa') ? 1 : 0,
       device: {
         dnt: getDNT() ? 1 : 0,
@@ -59,12 +73,18 @@ export const spec = {
         h: screen.height
       },
       ortb2: {
+        source,
+        user,
         site: {
-          keywords: bidderRequest.ortb2?.site?.keywords
+          keywords: site?.keywords,
+          sectioncat: site?.sectioncat,
+          pagecat: site?.pagecat,
+          cat: site?.cat
         },
-        at: bidderRequest.ortb2?.at,
-        bcat: bidderRequest.ortb2?.bcat,
-        wseat: bidderRequest.ortb2?.wseat
+        at: ortb2?.at,
+        bcat: ortb2?.bcat,
+        badv: ortb2?.badv,
+        wseat: ortb2?.wseat
       }
     }
 
@@ -105,13 +125,13 @@ export const spec = {
     }
 
     const {prebidResponse} = serverBody;
-    if (!prebidResponse || typeof prebidResponse !== 'object') {
+    if (!Array.isArray(prebidResponse)) {
       return [];
     }
 
-    let bids = [];
+    const bids = [];
     prebidResponse.forEach(bidResponse => {
-      let bid = deepClone(bidResponse);
+      const bid = deepClone(bidResponse);
       bid.cpm = parseFloat(bidResponse.cpm);
 
       // banner or video
@@ -129,12 +149,30 @@ export const spec = {
   },
 
   onBidWon: function (bid) {
-    if (BANNER == bid.mediaType && bid.winUrl) {
+    if (BANNER === bid.mediaType && bid.winUrl) {
       const winUrl = replaceAuctionPrice(bid.winUrl, bid.cpm);
       ajax(winUrl, null);
       return true;
     }
     return false;
+  },
+
+  getUserSyncs: function(syncOptions, serverResponses, gdprConsent) {
+    if (syncOptions.iframeEnabled && serverResponses.length > 0) {
+      const serverBody = serverResponses[0].body;
+      if (!serverBody || typeof serverBody !== 'object') return [];
+
+      const { iframeList } = serverBody;
+      if (!Array.isArray(iframeList)) return [];
+
+      const urls = [];
+      iframeList.forEach(url => {
+        urls.push({type: 'iframe', url});
+      })
+
+      return urls;
+    }
+    return [];
   }
 }
 
@@ -163,10 +201,21 @@ function getBidFloor(bidRequest, formatTypes) {
 }
 
 const getFormatType = bidRequest => {
-  let formats = []
+  const formats = []
   if (deepAccess(bidRequest, 'mediaTypes.banner')) formats.push('Banner')
   if (deepAccess(bidRequest, 'mediaTypes.video')) formats.push('Video')
   return formats
+}
+
+const getUserId = () => {
+  if (storage.localStorageIsEnabled()) {
+    let userId = storage.getDataFromLocalStorage(USER_ID_KEY)
+    if (!userId) {
+      userId = generateUUID()
+      storage.setDataInLocalStorage(USER_ID_KEY, userId)
+    }
+    return userId
+  }
 }
 
 registerBidder(spec);

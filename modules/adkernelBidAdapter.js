@@ -1,12 +1,11 @@
+import { getDNT } from '../libraries/navigatorData/dnt.js';
 import {
   _each,
-  cleanObj,
   contains,
   createTrackPixelHtml,
   deepAccess,
   deepSetValue,
   getDefinedParams,
-  getDNT,
   isArray,
   isArrayOfNums,
   isEmpty,
@@ -14,14 +13,14 @@ import {
   isPlainObject,
   isStr,
   mergeDeep,
-  parseGPTSingleSizeArrayToRtbSize
+  parseGPTSingleSizeArrayToRtbSize,
+  triggerPixel
 } from '../src/utils.js';
 import {BANNER, NATIVE, VIDEO} from '../src/mediaTypes.js';
 import {registerBidder} from '../src/adapters/bidderFactory.js';
-import {find} from '../src/polyfill.js';
 import {config} from '../src/config.js';
-import {convertOrtbRequestToProprietaryNative} from '../src/native.js';
 import {getAdUnitSizes} from '../libraries/sizeUtils/sizeUtils.js';
+import {getBidFloor} from '../libraries/adkernelUtils/adkernelUtils.js'
 
 /**
  * In case you're AdKernel whitelable platform's client who needs branded adapter to
@@ -39,7 +38,7 @@ const VIDEO_FPD = ['battr', 'pos'];
 const NATIVE_FPD = ['battr', 'api'];
 const BANNER_PARAMS = ['pos'];
 const BANNER_FPD = ['btype', 'battr', 'pos', 'api'];
-const VERSION = '1.6';
+const VERSION = '1.8';
 const SYNC_IFRAME = 1;
 const SYNC_IMAGE = 2;
 const SYNC_TYPES = {
@@ -48,33 +47,16 @@ const SYNC_TYPES = {
 };
 const GVLID = 14;
 
-const NATIVE_MODEL = [
-  {name: 'title', assetType: 'title'},
-  {name: 'icon', assetType: 'img', type: 1},
-  {name: 'image', assetType: 'img', type: 3},
-  {name: 'body', assetType: 'data', type: 2},
-  {name: 'body2', assetType: 'data', type: 10},
-  {name: 'sponsoredBy', assetType: 'data', type: 1},
-  {name: 'phone', assetType: 'data', type: 8},
-  {name: 'address', assetType: 'data', type: 9},
-  {name: 'price', assetType: 'data', type: 6},
-  {name: 'salePrice', assetType: 'data', type: 7},
-  {name: 'cta', assetType: 'data', type: 12},
-  {name: 'rating', assetType: 'data', type: 3},
-  {name: 'downloads', assetType: 'data', type: 5},
-  {name: 'likes', assetType: 'data', type: 4},
-  {name: 'displayUrl', assetType: 'data', type: 11}
-];
-
-const NATIVE_INDEX = NATIVE_MODEL.reduce((acc, val, idx) => {
-  acc[val.name] = {id: idx, ...val};
-  return acc;
-}, {});
-
 const MULTI_FORMAT_SUFFIX = '__mf';
 const MULTI_FORMAT_SUFFIX_BANNER = 'b' + MULTI_FORMAT_SUFFIX;
 const MULTI_FORMAT_SUFFIX_VIDEO = 'v' + MULTI_FORMAT_SUFFIX;
 const MULTI_FORMAT_SUFFIX_NATIVE = 'n' + MULTI_FORMAT_SUFFIX;
+
+const MEDIA_TYPES = {
+  BANNER: 1,
+  VIDEO: 2,
+  NATIVE: 4
+};
 
 /**
  * Adapter for requesting bids from AdKernel white-label display platform
@@ -102,7 +84,6 @@ export const spec = {
     {code: 'unibots'},
     {code: 'ergadx'},
     {code: 'turktelekom'},
-    {code: 'felixads'},
     {code: 'motionspots'},
     {code: 'sonic_twist'},
     {code: 'displayioads'},
@@ -111,7 +92,21 @@ export const spec = {
     {code: 'didnadisplay'},
     {code: 'qortex'},
     {code: 'adpluto'},
-    {code: 'headbidder'}
+    {code: 'headbidder'},
+    {code: 'digiad'},
+    {code: 'monetix'},
+    {code: 'hyperbrainz'},
+    {code: 'voisetech'},
+    {code: 'global_sun'},
+    {code: 'rxnetwork'},
+    {code: 'revbid'},
+    {code: 'spinx', gvlid: 1308},
+    {code: 'oppamedia'},
+    {code: 'pixelpluses', gvlid: 1209},
+    {code: 'urekamedia'},
+    {code: 'smartyexchange'},
+    {code: 'infinety'},
+    {code: 'qohere'}
   ],
   supportedMediaTypes: [BANNER, VIDEO, NATIVE],
 
@@ -127,7 +122,9 @@ export const spec = {
       !isNaN(Number(bidRequest.params.zoneId)) &&
       bidRequest.params.zoneId > 0 &&
       bidRequest.mediaTypes &&
-      (bidRequest.mediaTypes.banner || bidRequest.mediaTypes.video || (bidRequest.mediaTypes.native && validateNativeAdUnit(bidRequest.mediaTypes.native)));
+      (bidRequest.mediaTypes.banner || bidRequest.mediaTypes.video ||
+        (bidRequest.mediaTypes.native && validateNativeAdUnit(bidRequest.mediaTypes.native))
+      );
   },
 
   /**
@@ -137,14 +134,11 @@ export const spec = {
    * @returns {ServerRequest[]}
    */
   buildRequests: function (bidRequests, bidderRequest) {
-    // convert Native ORTB definition to old-style prebid native definition
-    bidRequests = convertOrtbRequestToProprietaryNative(bidRequests);
-
-    let impGroups = groupImpressionsByHostZone(bidRequests, bidderRequest.refererInfo);
-    let requests = [];
-    let schain = bidRequests[0].schain;
+    const impGroups = groupImpressionsByHostZone(bidRequests, bidderRequest.refererInfo);
+    const requests = [];
+    const schain = bidRequests[0]?.ortb2?.source?.ext?.schain;
     _each(impGroups, impGroup => {
-      let {host, zoneId, imps} = impGroup;
+      const {host, zoneId, imps} = impGroup;
       const request = buildRtbRequest(imps, bidderRequest, schain);
       requests.push({
         method: 'POST',
@@ -162,19 +156,19 @@ export const spec = {
    * @returns {Bid[]}
    */
   interpretResponse: function (serverResponse, serverRequest) {
-    let response = serverResponse.body;
+    const response = serverResponse.body;
     if (!response.seatbid) {
       return [];
     }
 
-    let rtbRequest = JSON.parse(serverRequest.data);
-    let rtbBids = response.seatbid
+    const rtbRequest = JSON.parse(serverRequest.data);
+    const rtbBids = response.seatbid
       .map(seatbid => seatbid.bid)
       .reduce((a, b) => a.concat(b), []);
 
     return rtbBids.map(rtbBid => {
-      let imp = find(rtbRequest.imp, imp => imp.id === rtbBid.impid);
-      let prBid = {
+      const imp = ((rtbRequest.imp) || []).find(imp => imp.id === rtbBid.impid);
+      const prBid = {
         requestId: rtbBid.impid,
         cpm: rtbBid.price,
         creativeId: rtbBid.crid,
@@ -185,19 +179,28 @@ export const spec = {
       if (prBid.requestId.endsWith(MULTI_FORMAT_SUFFIX)) {
         prBid.requestId = stripMultiformatSuffix(prBid.requestId);
       }
-      if ('banner' in imp) {
+      if (rtbBid.mtype === MEDIA_TYPES.BANNER) {
         prBid.mediaType = BANNER;
         prBid.width = rtbBid.w;
         prBid.height = rtbBid.h;
         prBid.ad = formatAdMarkup(rtbBid);
-      } else if ('video' in imp) {
+      } else if (rtbBid.mtype === MEDIA_TYPES.VIDEO) {
         prBid.mediaType = VIDEO;
-        prBid.vastUrl = rtbBid.nurl;
+        if (rtbBid.adm) {
+          prBid.vastXml = rtbBid.adm;
+          if (rtbBid.nurl) {
+            prBid.nurl = rtbBid.nurl;
+          }
+        } else {
+          prBid.vastUrl = rtbBid.nurl;
+        }
         prBid.width = imp.video.w;
         prBid.height = imp.video.h;
-      } else if ('native' in imp) {
+      } else if (rtbBid.mtype === MEDIA_TYPES.NATIVE) {
         prBid.mediaType = NATIVE;
-        prBid.native = buildNativeAd(JSON.parse(rtbBid.adm));
+        prBid.native = {
+          ortb: buildNativeAd(rtbBid.adm)
+        };
       }
       if (isStr(rtbBid.dealid)) {
         prBid.dealId = rtbBid.dealid;
@@ -238,6 +241,16 @@ export const spec = {
       .map(rsp => rsp.body.ext.adk_usersync)
       .reduce((a, b) => a.concat(b), [])
       .map(({url, type}) => ({type: SYNC_TYPES[type], url: url}));
+  },
+
+  /**
+   * Handle bid win
+   * @param bid {Bid}
+   */
+  onBidWon: function (bid) {
+    if (bid.nurl) {
+      triggerPixel(bid.nurl);
+    }
   }
 };
 
@@ -249,30 +262,18 @@ registerBidder(spec);
  * @param refererInfo {refererInfo}
  */
 function groupImpressionsByHostZone(bidRequests, refererInfo) {
-  let secure = (refererInfo && refererInfo.page?.indexOf('https:') === 0);
+  const secure = (refererInfo && refererInfo.page?.indexOf('https:') === 0);
   return Object.values(
     bidRequests.map(bidRequest => buildImps(bidRequest, secure))
       .reduce((acc, curr, index) => {
-        let bidRequest = bidRequests[index];
-        let {zoneId, host} = bidRequest.params;
-        let key = `${host}_${zoneId}`;
+        const bidRequest = bidRequests[index];
+        const {zoneId, host} = bidRequest.params;
+        const key = `${host}_${zoneId}`;
         acc[key] = acc[key] || {host: host, zoneId: zoneId, imps: []};
         acc[key].imps.push(...curr);
         return acc;
       }, {})
   );
-}
-
-function getBidFloor(bid, mediaType, sizes) {
-  var floor;
-  var size = sizes.length === 1 ? sizes[0] : '*';
-  if (typeof bid.getFloor === 'function') {
-    const floorInfo = bid.getFloor({currency: 'USD', mediaType, size});
-    if (typeof floorInfo === 'object' && floorInfo.currency === 'USD' && !isNaN(parseFloat(floorInfo.floor))) {
-      floor = parseFloat(floorInfo.floor);
-    }
-  }
-  return floor;
 }
 
 /**
@@ -281,17 +282,17 @@ function getBidFloor(bid, mediaType, sizes) {
  *  @param secure {boolean}
  */
 function buildImps(bidRequest, secure) {
-  let imp = {
+  const imp = {
     'id': bidRequest.bidId,
     'tagid': bidRequest.adUnitCode
   };
   if (secure) {
-    imp.secure = 1;
+    imp.secure = bidRequest.ortb2Imp?.secure ?? 1;
   }
   var sizes = [];
-  let mediaTypes = bidRequest.mediaTypes;
-  let isMultiformat = (~~!!mediaTypes?.banner + ~~!!mediaTypes?.video + ~~!!mediaTypes?.native) > 1;
-  let result = [];
+  const mediaTypes = bidRequest.mediaTypes;
+  const isMultiformat = (~~!!mediaTypes?.banner + ~~!!mediaTypes?.video + ~~!!mediaTypes?.native) > 1;
+  const result = [];
   let typedImp;
 
   if (mediaTypes?.banner) {
@@ -302,7 +303,7 @@ function buildImps(bidRequest, secure) {
       typedImp = imp;
     }
     sizes = getAdUnitSizes(bidRequest);
-    let pbBanner = mediaTypes.banner;
+    const pbBanner = mediaTypes.banner;
     typedImp.banner = {
       ...getDefinedParamsOrEmpty(bidRequest.ortb2Imp, BANNER_FPD),
       ...getDefinedParamsOrEmpty(pbBanner, BANNER_PARAMS),
@@ -320,7 +321,7 @@ function buildImps(bidRequest, secure) {
     } else {
       typedImp = imp;
     }
-    let pbVideo = mediaTypes.video;
+    const pbVideo = mediaTypes.video;
     typedImp.video = {
       ...getDefinedParamsOrEmpty(bidRequest.ortb2Imp, VIDEO_FPD),
       ...getDefinedParamsOrEmpty(pbVideo, VIDEO_PARAMS)
@@ -343,11 +344,9 @@ function buildImps(bidRequest, secure) {
     } else {
       typedImp = imp;
     }
-    let nativeRequest = buildNativeRequest(mediaTypes.native);
     typedImp.native = {
       ...getDefinedParamsOrEmpty(bidRequest.ortb2Imp, NATIVE_FPD),
-      ver: '1.1',
-      request: JSON.stringify(nativeRequest)
+      request: JSON.stringify(bidRequest.nativeOrtbRequest)
     };
     initImpBidfloor(typedImp, bidRequest, sizes, isMultiformat ? '*' : NATIVE);
     result.push(typedImp);
@@ -356,7 +355,7 @@ function buildImps(bidRequest, secure) {
 }
 
 function initImpBidfloor(imp, bid, sizes, mediaType) {
-  let bidfloor = getBidFloor(bid, mediaType, sizes);
+  const bidfloor = getBidFloor(bid, mediaType, sizes);
   if (bidfloor) {
     imp.bidfloor = bidfloor;
   }
@@ -370,51 +369,6 @@ function getDefinedParamsOrEmpty(object, params) {
 }
 
 /**
- * Builds native request from native adunit
- */
-function buildNativeRequest(nativeReq) {
-  let request = {ver: '1.1', assets: []};
-  for (let k of Object.keys(nativeReq)) {
-    let v = nativeReq[k];
-    let desc = NATIVE_INDEX[k];
-    if (desc === undefined) {
-      continue;
-    }
-    let assetRoot = {
-      id: desc.id,
-      required: ~~v.required,
-    };
-    if (desc.assetType === 'img') {
-      assetRoot[desc.assetType] = buildImageAsset(desc, v);
-    } else if (desc.assetType === 'data') {
-      assetRoot.data = cleanObj({type: desc.type, len: v.len});
-    } else if (desc.assetType === 'title') {
-      assetRoot.title = {len: v.len || 90};
-    } else {
-      return;
-    }
-    request.assets.push(assetRoot);
-  }
-  return request;
-}
-
-/**
- *  Builds image asset request
- */
-function buildImageAsset(desc, val) {
-  let img = {
-    type: desc.type
-  };
-  if (val.sizes) {
-    [img.w, img.h] = val.sizes;
-  } else if (val.aspect_ratios) {
-    img.wmin = val.aspect_ratios[0].min_width;
-    img.hmin = val.aspect_ratios[0].min_height;
-  }
-  return cleanObj(img);
-}
-
-/**
  * Checks if configuration allows specified sync method
  * @param syncRule {Object}
  * @param bidderCode {string}
@@ -424,8 +378,8 @@ function isSyncMethodAllowed(syncRule, bidderCode) {
   if (!syncRule) {
     return false;
   }
-  let bidders = isArray(syncRule.bidders) ? syncRule.bidders : [bidderCode];
-  let rule = syncRule.filter === 'include';
+  const bidders = isArray(syncRule.bidders) ? syncRule.bidders : [bidderCode];
+  const rule = syncRule.filter === 'include';
   return contains(bidders, bidderCode) === rule;
 }
 
@@ -438,7 +392,7 @@ function getAllowedSyncMethod(bidderCode) {
   if (!config.getConfig('userSync.syncEnabled')) {
     return;
   }
-  let filterConfig = config.getConfig('userSync.filterSettings');
+  const filterConfig = config.getConfig('userSync.filterSettings');
   if (isSyncMethodAllowed(filterConfig.all, bidderCode) || isSyncMethodAllowed(filterConfig.iframe, bidderCode)) {
     return SYNC_IFRAME;
   } else if (isSyncMethodAllowed(filterConfig.image, bidderCode)) {
@@ -452,7 +406,7 @@ function getAllowedSyncMethod(bidderCode) {
  * @returns {{device: Object}}
  */
 function makeDevice(fpd) {
-  let device = mergeDeep({
+  const device = mergeDeep({
     'ip': 'caller',
     'ipv6': 'caller',
     'ua': 'caller',
@@ -472,8 +426,8 @@ function makeDevice(fpd) {
  * @returns {{site: Object}|{app: Object}}
  */
 function makeSiteOrApp(bidderRequest, fpd) {
-  let {refererInfo} = bidderRequest;
-  let appConfig = config.getConfig('app');
+  const {refererInfo} = bidderRequest;
+  const appConfig = config.getConfig('app');
   if (isEmpty(appConfig)) {
     return {site: createSite(refererInfo, fpd)}
   } else {
@@ -488,12 +442,12 @@ function makeSiteOrApp(bidderRequest, fpd) {
  * @returns {{user: Object} | undefined}
  */
 function makeUser(bidderRequest, fpd) {
-  let {gdprConsent} = bidderRequest;
-  let user = fpd.user || {};
+  const {gdprConsent} = bidderRequest;
+  const user = fpd.user || {};
   if (gdprConsent && gdprConsent.consentString !== undefined) {
     deepSetValue(user, 'ext.consent', gdprConsent.consentString);
   }
-  let eids = getExtendedUserIds(bidderRequest);
+  const eids = getExtendedUserIds(bidderRequest);
   if (eids) {
     deepSetValue(user, 'ext.eids', eids);
   }
@@ -508,8 +462,8 @@ function makeUser(bidderRequest, fpd) {
  * @returns {{regs: Object} | undefined}
  */
 function makeRegulations(bidderRequest) {
-  let {gdprConsent, uspConsent, gppConsent} = bidderRequest;
-  let regs = {};
+  const {gdprConsent, uspConsent, gppConsent} = bidderRequest;
+  const regs = {};
   if (gdprConsent) {
     if (gdprConsent.gdprApplies !== undefined) {
       deepSetValue(regs, 'regs.ext.gdpr', ~~gdprConsent.gdprApplies);
@@ -538,12 +492,11 @@ function makeRegulations(bidderRequest) {
  * @returns
  */
 function makeBaseRequest(bidderRequest, imps, fpd) {
-  let {timeout} = bidderRequest;
-  let request = {
+  const request = {
     'id': bidderRequest.bidderRequestId,
     'imp': imps,
     'at': 1,
-    'tmax': parseInt(timeout)
+    'tmax': parseInt(bidderRequest.timeout)
   };
   if (!isEmpty(fpd.bcat)) {
     request.bcat = fpd.bcat;
@@ -559,10 +512,10 @@ function makeBaseRequest(bidderRequest, imps, fpd) {
  * @param bidderRequest {BidderRequest}
  */
 function makeSyncInfo(bidderRequest) {
-  let {bidderCode} = bidderRequest;
-  let syncMethod = getAllowedSyncMethod(bidderCode);
+  const {bidderCode} = bidderRequest;
+  const syncMethod = getAllowedSyncMethod(bidderCode);
   if (syncMethod) {
-    let res = {};
+    const res = {};
     deepSetValue(res, 'ext.adk_usersync', syncMethod);
     return res;
   }
@@ -576,9 +529,9 @@ function makeSyncInfo(bidderRequest) {
  * @return {Object} Complete rtb request
  */
 function buildRtbRequest(imps, bidderRequest, schain) {
-  let fpd = bidderRequest.ortb2 || {};
+  const fpd = bidderRequest.ortb2 || {};
 
-  let req = mergeDeep(
+  const req = mergeDeep(
     makeBaseRequest(bidderRequest, imps, fpd),
     makeDevice(fpd),
     makeSiteOrApp(bidderRequest, fpd),
@@ -605,7 +558,7 @@ function getLanguage() {
  * Creates site description object
  */
 function createSite(refInfo, fpd) {
-  let site = {
+  const site = {
     'domain': refInfo.domain,
     'page': refInfo.page
   };
@@ -619,7 +572,7 @@ function createSite(refInfo, fpd) {
 }
 
 function getExtendedUserIds(bidderRequest) {
-  let eids = deepAccess(bidderRequest, 'bids.0.userIdAsEids');
+  const eids = deepAccess(bidderRequest, 'bids.0.userIdAsEids');
   if (isArray(eids)) {
     return eids;
   }
@@ -663,26 +616,15 @@ function validateNativeImageSize(img) {
 }
 
 /**
- * Creates native ad for native 1.1 response
+ * Creates native ad for native 1.2 response
  */
-function buildNativeAd(nativeResp) {
-  const {assets, link, imptrackers, jstracker, privacy} = nativeResp.native;
-  let nativeAd = {
-    clickUrl: link.url,
-    impressionTrackers: imptrackers,
-    javascriptTrackers: jstracker ? [jstracker] : undefined,
-    privacyLink: privacy,
-  };
-  _each(assets, asset => {
-    let assetName = NATIVE_MODEL[asset.id].name;
-    let assetType = NATIVE_MODEL[asset.id].assetType;
-    nativeAd[assetName] = asset[assetType].text || asset[assetType].value || cleanObj({
-      url: asset[assetType].url,
-      width: asset[assetType].w,
-      height: asset[assetType].h
-    });
-  });
-  return cleanObj(nativeAd);
+function buildNativeAd(adm) {
+  let resp = JSON.parse(adm);
+  // temporary workaround for top-level native object wrapper
+  if ('native' in resp) {
+    resp = resp.native;
+  }
+  return resp;
 }
 
 function stripMultiformatSuffix(impid) {

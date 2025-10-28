@@ -1,10 +1,11 @@
-import {deepAccess, isArray} from '../src/utils.js';
+import {isArray, setOnAny} from '../src/utils.js';
 import {registerBidder} from '../src/adapters/bidderFactory.js';
 import {BANNER} from '../src/mediaTypes.js';
 
 /**
  * @typedef {import('../src/adapters/bidderFactory.js').BidRequest} BidRequest
  * @typedef {import('../src/adapters/bidderFactory.js').Bid} Bid
+ * @typedef {import('../src/adapters/bidderFactory.js').validBidRequests} validBidRequests
  * @typedef {import('../src/adapters/bidderFactory.js').ServerResponse} ServerResponse
  * @typedef {import('../src/adapters/bidderFactory.js').SyncOptions} SyncOptions
  * @typedef {import('../src/adapters/bidderFactory.js').UserSync} UserSync
@@ -32,7 +33,7 @@ export const spec = {
   /**
    * Make a server request from the list of BidRequests.
    *
-   * @param {validBidRequests[]} - an array of bids
+   * @param {validBidRequests} validBidRequests - an array of bids
    * @return ServerRequest Info describing the request to the server.
    */
   buildRequests: function(validBidRequests, bidderRequest) {
@@ -45,7 +46,9 @@ export const spec = {
     const endpointUrl = 'https://ai-p-codefuel-ds-rtb-us-east-1-k8s.seccint.com/prebid'
     const timeout = bidderRequest.timeout;
 
-    validBidRequests.forEach(bid => bid.netRevenue = 'net');
+    validBidRequests.forEach(bid => {
+      bid.netRevenue = 'net';
+    });
 
     const imps = validBidRequests.map((bid, idx) => {
       const imp = {
@@ -120,6 +123,7 @@ export const spec = {
         };
         return bidObject;
       }
+      return undefined;
     }).filter(Boolean);
   },
 
@@ -145,15 +149,6 @@ function getDeviceType() {
     return 4; // 'mobile'
   }
   return 2; // 'desktop'
-}
-
-function setOnAny(collection, key) {
-  for (let i = 0, result; i < collection.length; i++) {
-    result = deepAccess(collection[i], key);
-    if (result) {
-      return result;
-    }
-  }
 }
 
 function flatten(arr) {

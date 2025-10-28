@@ -1,6 +1,6 @@
 import {registerBidder} from '../src/adapters/bidderFactory.js';
 import {BANNER} from '../src/mediaTypes.js';
-import {deepAccess, parseSizesInput} from '../src/utils.js';
+import {deepAccess, isPlainObject, parseSizesInput} from '../src/utils.js';
 import {getAdUnitSizes} from '../libraries/sizeUtils/sizeUtils.js';
 
 /**
@@ -40,8 +40,9 @@ export const spec = {
   /**
    * Make a server request from the list of BidRequests.
    *
-   * @param {validBidRequests[]} - an array of bids
-   * @return ServerRequest Info describing the request to the server.
+   * @param {Array} validBidRequests - an array of bids
+   * @param {Object} bidderRequest
+   * @return {Object} Info describing the request to the server.
    */
   buildRequests: function(validBidRequests, bidderRequest) {
     if (!validBidRequests || validBidRequests.length === 0 || !bidderRequest || !bidderRequest.bids) {
@@ -73,8 +74,9 @@ export const spec = {
       payload.pageTemplate = validBidRequests[0].params.pageTemplate;
     }
 
-    if (validBidRequests[0].schain) {
-      payload.schain = validBidRequests[0].schain;
+    const schain = validBidRequests[0]?.ortb2?.source?.ext?.schain;
+    if (schain) {
+      payload.schain = schain;
     }
 
     const gdpr = deepAccess(bidderRequest, 'gdprConsent');
@@ -92,12 +94,24 @@ export const spec = {
       }
     }
 
+    if (bidderRequest?.gppConsent?.gppString) {
+      payload.gpp = {
+        consent: bidderRequest.gppConsent.gppString,
+        sid: bidderRequest.gppConsent.applicableSections
+      }
+    } else if (bidderRequest?.ortb2?.regs?.gpp) {
+      payload.gpp = {
+        consent: bidderRequest.ortb2.regs.gpp,
+        sid: bidderRequest.ortb2.regs.gpp_sid
+      }
+    }
+
     if (window.location.href.indexOf('optidigitalTestMode=true') !== -1) {
       payload.testMode = true;
     }
 
     if (bidderRequest && bidderRequest.uspConsent) {
-      payload.uspConsent = bidderRequest.uspConsent;
+      payload.us_privacy = bidderRequest.uspConsent;
     }
 
     if (_getEids(validBidRequests[0])) {
@@ -153,7 +167,7 @@ export const spec = {
    * @param {ServerResponse[]} serverResponses List of server's responses.
    * @return {UserSync[]} The user syncs which should be dropped.
    */
-  getUserSyncs: function(syncOptions, serverResponses, gdprConsent, uspConsent) {
+  getUserSyncs: function(syncOptions, serverResponses, gdprConsent, uspConsent, gppConsent) {
     let syncurl = '';
     if (!isSynced) {
       // Attaching GDPR Consent Params in UserSync url
@@ -161,8 +175,12 @@ export const spec = {
         syncurl += '&gdpr=' + (gdprConsent.gdprApplies ? 1 : 0);
         syncurl += '&gdpr_consent=' + encodeURIComponent(gdprConsent.consentString || '');
       }
-      if (uspConsent && uspConsent.consentString) {
-        syncurl += `&ccpa_consent=${uspConsent.consentString}`;
+      if (uspConsent) {
+        syncurl += '&us_privacy=' + encodeURIComponent(uspConsent);
+      }
+      if (gppConsent?.gppString && gppConsent?.applicableSections?.length) {
+        syncurl += '&gpp=' + encodeURIComponent(gppConsent.gppString);
+        syncurl += '&gpp_sid=' + encodeURIComponent(gppConsent?.applicableSections?.join(','));
       }
 
       if (syncOptions.iframeEnabled) {
@@ -202,12 +220,12 @@ function buildImp(bidRequest, ortb2) {
     CUR = bidRequest.params.currency;
   }
 
-  let bidFloor = _getFloor(bidRequest, floorSizes, CUR);
+  const bidFloor = _getFloor(bidRequest, floorSizes, CUR);
   if (bidFloor) {
     imp.bidFloor = bidFloor;
   }
 
-  let battr = ortb2.battr || deepAccess(bidRequest, 'params.battr');
+  const battr = ortb2.battr || deepAccess(bidRequest, 'params.battr');
   if (battr && Array.isArray(battr) && battr.length) {
     imp.battr = battr;
   }
@@ -223,7 +241,7 @@ function getAdContainer(container) {
 
 function _getFloor (bid, sizes, currency) {
   let floor = null;
-  let size = sizes.length === 1 ? sizes[0] : '*';
+  const size = sizes.length === 1 ? sizes[0] : '*';
   if (typeof bid.getFloor === 'function') {
     try {
       const floorInfo = bid.getFloor({
@@ -231,7 +249,7 @@ function _getFloor (bid, sizes, currency) {
         mediaType: 'banner',
         size: size
       });
-      if (typeof floorInfo === 'object' && floorInfo.currency === CUR && !isNaN(parseFloat(floorInfo.floor))) {
+      if (isPlainObject(floorInfo) && floorInfo.currency === CUR && !isNaN(parseFloat(floorInfo.floor))) {
         floor = parseFloat(floorInfo.floor);
       }
     } catch (err) {}

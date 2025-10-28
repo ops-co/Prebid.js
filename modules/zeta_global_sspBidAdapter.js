@@ -3,17 +3,17 @@ import {registerBidder} from '../src/adapters/bidderFactory.js';
 import {BANNER, VIDEO} from '../src/mediaTypes.js';
 import {config} from '../src/config.js';
 import {parseDomain} from '../src/refererDetection.js';
-import {ajax} from '../src/ajax.js';
 
 /**
  * @typedef {import('../src/adapters/bidderFactory.js').BidRequest} BidRequest
  * @typedef {import('../src/adapters/bidderFactory.js').Bid} Bid
  * @typedef {import('../src/adapters/bidderFactory.js').ServerResponse} ServerResponse
+ * @typedef {import('../src/adapters/bidderFactory.js').Bids} Bids
+ * @typedef {import('../src/adapters/bidderFactory.js').BidderRequest} BidderRequest
  */
 
 const BIDDER_CODE = 'zeta_global_ssp';
 const ENDPOINT_URL = 'https://ssp.disqus.com/bid/prebid';
-const TIMEOUT_URL = 'https://ssp.disqus.com/timeout/prebid';
 const USER_SYNC_URL_IFRAME = 'https://ssp.disqus.com/sync?type=iframe';
 const USER_SYNC_URL_IMAGE = 'https://ssp.disqus.com/sync?type=image';
 const DEFAULT_CUR = 'USD';
@@ -48,6 +48,7 @@ const VIDEO_CUSTOM_PARAMS = {
 
 export const spec = {
   code: BIDDER_CODE,
+  gvlid: 469,
   supportedMediaTypes: [BANNER, VIDEO],
 
   /**
@@ -123,12 +124,12 @@ export const spec = {
       return impData;
     });
 
-    let payload = {
+    const payload = {
       id: bidderRequest.bidderRequestId,
       cur: [DEFAULT_CUR],
       imp: imps,
-      site: params.site ? params.site : {},
-      device: {...(bidderRequest.ortb2?.device || {}), ...params.device},
+      site: {...bidderRequest?.ortb2?.site, ...params?.site},
+      device: {...bidderRequest?.ortb2?.device, ...params?.device},
       user: params.user ? params.user : {},
       app: params.app ? params.app : {},
       ext: {
@@ -137,14 +138,27 @@ export const spec = {
       }
     };
     const rInfo = bidderRequest.refererInfo;
-    // TODO: do the fallbacks make sense here?
-    payload.site.page = rInfo.page || rInfo.topmostLocation;
-    payload.site.domain = parseDomain(payload.site.page, {noLeadingWww: true});
+    if (rInfo) {
+      payload.site.page = cropPage(rInfo.page || rInfo.topmostLocation);
+      payload.site.domain = parseDomain(payload.site.page, {noLeadingWww: true});
+    }
 
     payload.device.ua = navigator.userAgent;
     payload.device.language = navigator.language;
     payload.device.w = screen.width;
     payload.device.h = screen.height;
+
+    if (bidderRequest.ortb2?.user?.geo && bidderRequest.ortb2?.device?.geo) {
+      payload.device.geo = { ...payload.device.geo, ...bidderRequest.ortb2?.device.geo };
+      payload.user.geo = { ...payload.user.geo, ...bidderRequest.ortb2?.user.geo };
+    } else {
+      if (bidderRequest.ortb2?.user?.geo) {
+        payload.user.geo = payload.device.geo = { ...payload.user.geo, ...bidderRequest.ortb2?.user.geo };
+      }
+      if (bidderRequest.ortb2?.device?.geo) {
+        payload.user.geo = payload.device.geo = { ...payload.user.geo, ...bidderRequest.ortb2?.device.geo };
+      }
+    }
 
     if (bidderRequest?.ortb2?.device?.sua) {
       payload.device.sua = bidderRequest.ortb2.device.sua;
@@ -165,17 +179,35 @@ export const spec = {
       deepSetValue(payload, 'regs.ext.us_privacy', bidderRequest.uspConsent);
     }
 
-    // schain
-    if (validBidRequests[0].schain) {
+    // Attaching GPP Consent Params
+    if (bidderRequest?.gppConsent?.gppString) {
+      deepSetValue(payload, 'regs.gpp', bidderRequest.gppConsent.gppString);
+      deepSetValue(payload, 'regs.gpp_sid', bidderRequest.gppConsent.applicableSections);
+    } else if (bidderRequest?.ortb2?.regs?.gpp) {
+      deepSetValue(payload, 'regs.gpp', bidderRequest.ortb2.regs.gpp);
+      deepSetValue(payload, 'regs.gpp_sid', bidderRequest.ortb2.regs.gpp_sid);
+    }
+
+    // schain - check for schain in the new location
+    const schain = validBidRequests[0]?.ortb2?.source?.ext?.schain;
+    if (schain) {
       payload.source = {
         ext: {
-          schain: validBidRequests[0].schain
+          schain: schain
         }
       }
     }
 
     if (bidderRequest?.timeout) {
       payload.tmax = bidderRequest.timeout;
+    }
+
+    if (bidderRequest?.ortb2?.bcat) {
+      payload.bcat = bidderRequest.ortb2.bcat;
+    }
+
+    if (bidderRequest?.ortb2?.badv) {
+      payload.badv = bidderRequest.ortb2.badv;
     }
 
     provideEids(validBidRequests[0], payload);
@@ -196,12 +228,13 @@ export const spec = {
    * @return {Bid[]} An array of bids which were nested inside the server.
    */
   interpretResponse: function (serverResponse, bidRequest) {
-    let bidResponses = [];
+    const bidResponses = [];
     const response = (serverResponse || {}).body;
     if (response && response.seatbid && response.seatbid[0].bid && response.seatbid[0].bid.length) {
       response.seatbid.forEach(zetaSeatbid => {
+        const seat = zetaSeatbid.seat;
         zetaSeatbid.bid.forEach(zetaBid => {
-          let bid = {
+          const bid = {
             requestId: zetaBid.impid,
             cpm: zetaBid.price,
             currency: response.cur,
@@ -221,6 +254,9 @@ export const spec = {
           if (bid.mediaType === VIDEO) {
             bid.vastXml = bid.ad;
           }
+          if (seat) {
+            bid.dspId = seat;
+          }
           bidResponses.push(bid);
         })
       })
@@ -231,7 +267,7 @@ export const spec = {
   /**
    * Register User Sync.
    */
-  getUserSyncs: (syncOptions, responses, gdprConsent, uspConsent) => {
+  getUserSyncs: (syncOptions, responses, gdprConsent, uspConsent, gppConsent) => {
     let syncurl = '';
 
     // Attaching GDPR Consent Params in UserSync url
@@ -243,6 +279,12 @@ export const spec = {
     // CCPA
     if (uspConsent) {
       syncurl += '&us_privacy=' + encodeURIComponent(uspConsent);
+    }
+
+    // GPP Consent
+    if (gppConsent?.gppString && gppConsent?.applicableSections?.length) {
+      syncurl += '&gpp=' + encodeURIComponent(gppConsent.gppString);
+      syncurl += '&gpp_sid=' + encodeURIComponent(gppConsent?.applicableSections?.join(','));
     }
 
     // coppa compliance
@@ -260,18 +302,6 @@ export const spec = {
         type: 'image',
         url: USER_SYNC_URL_IMAGE + syncurl
       }];
-    }
-  },
-
-  onTimeout: function(timeoutData) {
-    if (timeoutData) {
-      ajax(TIMEOUT_URL, null, JSON.stringify(timeoutData), {
-        method: 'POST',
-        options: {
-          withCredentials: false,
-          contentType: 'application/json'
-        }
-      });
     }
   }
 }
@@ -304,7 +334,7 @@ function buildBanner(request) {
 }
 
 function buildVideo(request) {
-  let video = {};
+  const video = {};
   const videoParams = deepAccess(request, 'mediaTypes.video', {});
   for (const key in VIDEO_CUSTOM_PARAMS) {
     if (videoParams.hasOwnProperty(key)) {
@@ -379,8 +409,36 @@ function provideMediaType(zetaBid, bid, bidRequest) {
   }
 }
 
+function cropPage(page) {
+  if (page) {
+    if (page.length > 100) {
+      page = page.substring(0, 100);
+    }
+    if (page.startsWith('https://')) {
+      page = page.substring(8);
+    } else if (page.startsWith('http://')) {
+      page = page.substring(7);
+    }
+    if (page.startsWith('www.')) {
+      page = page.substring(4);
+    }
+    for (let i = 3; i < page.length; i++) {
+      const c = page[i];
+      if (c === '#' || c === '?') {
+        return page.substring(0, i);
+      }
+    }
+    return page;
+  }
+  return '';
+}
+
 function clearEmpties(o) {
-  for (let k in o) {
+  for (const k in o) {
+    if (o[k] === null) {
+      delete o[k];
+      continue;
+    }
     if (!o[k] || typeof o[k] !== 'object') {
       continue;
     }

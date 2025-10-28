@@ -1,9 +1,10 @@
-import { _each, deepSetValue, isEmpty } from '../src/utils.js';
+import { _each, deepAccess, deepSetValue, isEmpty } from '../src/utils.js';
 import { config } from '../src/config.js';
 import { registerBidder } from '../src/adapters/bidderFactory.js';
 
 /**
  * @typedef {import('../src/adapters/bidderFactory.js').BidRequest} BidRequest
+ * @typedef {import('../src/adapters/bidderFactory.js').BidderRequest} BidderRequest
  * @typedef {import('../src/adapters/bidderFactory.js').validBidRequests} validBidRequests
  */
 
@@ -30,8 +31,8 @@ export const spec = {
   /**
    * Make a server request from the list of BidRequests.
    *
-   * @param {validBidRequests[]} - an array of bids.
-   * @param {bidderRequest} bidderRequest bidder request object.
+   * @param {validBidRequests} validBidRequests an array of bids.
+   * @param {BidderRequest} bidderRequest bidder request object.
    * @return ServerRequest Info describing the request to the server.
    */
   buildRequests: (validBidRequests, bidderRequest) => {
@@ -40,7 +41,7 @@ export const spec = {
 
     _each(validBidRequests, (request) => {
       const impExt = request.ortb2Imp?.ext;
-      const data = Object();
+      const data = {};
 
       data.page = page;
       data.adUnitCode = request.adUnitCode;
@@ -55,7 +56,7 @@ export const spec = {
 
       if (impExt) {
         data.transactionId = impExt.tid;
-        data.gpid = impExt.gpid ?? impExt.data?.pbadslot ?? impExt.data?.adserver?.adslot;
+        data.gpid = impExt.gpid ?? impExt.data?.adserver?.adslot;
       }
       if (bidderRequest.gdprConsent) {
         deepSetValue(data, 'regs.gdpr', {
@@ -71,7 +72,20 @@ export const spec = {
       if (config.getConfig('coppa') === true) {
         deepSetValue(data, 'regs.coppa', 1);
       }
-
+      if (bidderRequest.gppConsent) {
+        deepSetValue(data, 'regs.gpp', {
+          string: bidderRequest.gppConsent.gppString,
+          sid: bidderRequest.gppConsent.applicableSections
+        });
+      } else if (bidderRequest.ortb2?.regs?.gpp) {
+        deepSetValue(data, 'regs.gpp', {
+          string: bidderRequest.ortb2.regs.gpp,
+          sid: bidderRequest.ortb2.regs.gpp_sid
+        });
+      }
+      if (bidderRequest.ortb2?.user?.ext?.data?.im_segments) {
+        deepSetValue(data, 'params.kv.imsids', bidderRequest.ortb2.user.ext.data.im_segments);
+      }
       data.sizes = [];
       _each(request.sizes, (size) => {
         data.sizes.push({
@@ -82,9 +96,12 @@ export const spec = {
 
       data.params = request.params;
 
-      if (request.schain) {
-        data.schain = request.schain;
+      const schain = request?.ortb2?.source?.ext?.schain;
+      if (schain) {
+        data.schain = schain;
       }
+
+      data.instl = deepAccess(request, 'ortb2Imp.instl') === 1 || request.params.instl === 1 ? 1 : 0;
 
       const searchParams = new URLSearchParams({
         dfpUnitCode: request.params.dfpUnitCode,
@@ -128,7 +145,7 @@ export const spec = {
       const callImpBeacon = `<script type="application/javascript">` +
         `(function() { var img = new Image(); img.src = "${beaconUrl}"})()` +
         `</script>`;
-      let data = {
+      const data = {
         requestId: res.id,
         currency: res.cur,
         cpm: parseFloat(bid.price) || 0,

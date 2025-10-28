@@ -8,7 +8,7 @@ import {
 } from 'modules/greenbidsRtdProvider.js';
 import { server } from '../../mocks/xhr.js';
 import * as events from '../../../src/events.js';
-import CONSTANTS from '../../../src/constants.json';
+import { EVENTS } from '../../../src/constants.js';
 
 describe('greenbidsRtdProvider', () => {
   const endPoint = 't.greenbids.ai';
@@ -158,8 +158,8 @@ describe('greenbidsRtdProvider', () => {
 
   describe('getBidRequestData', () => {
     it('Callback is called if the server responds a 200 within the time limit', (done) => {
-      let requestBids = deepClone(SAMPLE_REQUEST_BIDS_CONFIG_OBJ);
-      let callback = sinon.stub();
+      const requestBids = deepClone(SAMPLE_REQUEST_BIDS_CONFIG_OBJ);
+      const callback = sinon.stub();
 
       greenbidsSubmodule.getBidRequestData(requestBids, callback, SAMPLE_MODULE_CONFIG);
 
@@ -191,8 +191,8 @@ describe('greenbidsRtdProvider', () => {
 
   describe('getBidRequestData', () => {
     it('Nothing changes if the server times out but still the callback is called', (done) => {
-      let requestBids = deepClone(SAMPLE_REQUEST_BIDS_CONFIG_OBJ);
-      let callback = sinon.stub();
+      const requestBids = deepClone(SAMPLE_REQUEST_BIDS_CONFIG_OBJ);
+      const callback = sinon.stub();
 
       greenbidsSubmodule.getBidRequestData(requestBids, callback, SAMPLE_MODULE_CONFIG);
 
@@ -218,8 +218,8 @@ describe('greenbidsRtdProvider', () => {
 
   describe('getBidRequestData', () => {
     it('callback is called if the server responds a 500 error within the time limit and no changes are made', (done) => {
-      let requestBids = deepClone(SAMPLE_REQUEST_BIDS_CONFIG_OBJ);
-      let callback = sinon.stub();
+      const requestBids = deepClone(SAMPLE_REQUEST_BIDS_CONFIG_OBJ);
+      const callback = sinon.stub();
 
       greenbidsSubmodule.getBidRequestData(requestBids, callback, SAMPLE_MODULE_CONFIG);
 
@@ -332,7 +332,7 @@ describe('greenbidsRtdProvider', () => {
 
     it('should  emit billable event if greenbids has set the adunit.ext value', function (done) {
       let counter = 0;
-      events.on(CONSTANTS.EVENTS.BILLABLE_EVENT, function (event) {
+      events.on(EVENTS.BILLABLE_EVENT, function (event) {
         if (event.vendor === 'greenbidsRtdProvider' && event.type === 'auction') {
           counter += 1;
         }
